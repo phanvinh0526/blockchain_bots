@@ -1,18 +1,21 @@
 import asyncio
 import logging, time
 import re
-import requests, json
-from time import sleep
-from datetime import datetime, timedelta
+# import requests, json
+# from time import sleep
+# from datetime import datetime, timedelta
+import os
+import psycopg2
+from psycopg2 import sql
 
 from aiogram import types, Dispatcher, Router, Bot
 from aiogram.filters import CommandStart, Command
 from aiogram.methods import SendMessage
 from aiogram.client.default import DefaultBotProperties
 
-from solana.rpc.async_api import AsyncClient
-from solders.pubkey import Pubkey
-from solana.rpc.types import MemcmpOpts
+# from solana.rpc.async_api import AsyncClient
+# from solders.pubkey import Pubkey
+# from solana.rpc.types import MemcmpOpts
 
 
 # ###### DESCRIPTION ###### #
@@ -31,23 +34,22 @@ from solana.rpc.types import MemcmpOpts
 #-------------------------#
 
 # CREDENTIALS
-TELE_BOT_TOKEN     = "7237562805:AAGm2Eze9JfBkB7QGIhu56nDZ_mcQtBvV28"
-BIRDEYE_API_TOKEN  = "6af62e0ddb424d288693b68e3c72805e"
-ALCHEMY_API_TOKEN  = "8lkJ9fP65TFrEXHYY_M6eoc_cxjGZ1IX"
+# TELE_BOT_TOKEN     = "7237562805:AAGm2Eze9JfBkB7QGIhu56nDZ_mcQtBvV28"
+# DATABASE_URL       = "postgres://u7r3q8fi3oil8d:p7c4ab7923edcd720fad4e7373c00c69924b36cd5449778bcf0e5a70268616cdd@cbec45869p4jbu.cluster-czrs8kj4isg7.us-east-1.rds.amazonaws.com:5432/d2jp5l4pcu7iuv"
+TELE_BOT_TOKEN = os.environ['TELE_BOT_TOKEN']
 
-# APIs
-headers = {
-    "x-chain": "solana",
-    "X-API-KEY": BIRDEYE_API_TOKEN
-}
-birdeye_endpoint = "https://public-api.birdeye.so/"
+# Connect to PostgresDb
+DATABASE_URL = os.environ['DATABASE_URL']
 
 # Constants
-TAR_FORUM_ID = -1002229815206
-TAR_TOPIC_ID = 9015
+# TAR_FORUM_ID = -1002229815206
+# TAR_TOPIC_ID = 9015
+TAR_FORUM_ID = os.environ['TAR_FORUM_ID']
+TAR_TOPIC_ID = os.environ['TAR_TOPIC_ID']
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
+
 
 # Dispatcher
 dp = Dispatcher()
@@ -58,6 +60,7 @@ bot = Bot(
 
 # ############## #
 # Command handlers
+# ############## #
 @dp.message(CommandStart())
 async def cmd_start(msg: types.Message) -> None:
     await msg.answer(
@@ -81,11 +84,12 @@ async def message_handler(msg: types.Message) -> None:
     # Extract pool information
     pool_info = extract_pool_info(msg.text)
 
-    # Update pool_info to the DB
-    # TODO
+    # If Mc >= 50k and Liq >= 20k
+    if(pool_info['market_cap'] is not None and check_conditions(pool_info) == True):
+        # Update pool_info to the DB
+        add_record_to_db(DATABASE_URL, "token_pool_info", pool_info)
 
-    # If Mc >= 50k and Liq >= 20k, forward to dedicated Channel
-    if(pool_info['Market_Cap'] is not None and check_conditions(pool_info) == True):
+        # Forward to dedicated Channel
         await forward_message_to_a_forum(msg)
 
     # logging
@@ -99,8 +103,8 @@ async def message_handler(msg: types.Message) -> None:
 # Functions
 def check_conditions(token: dict) -> bool:
     # FDV between 20k - 50k
-    print(f"***Market_Cap: {token['Market_Cap']}") # Market_Cap: 887.3k / Liquidity_Pool_Value: 56.4k
-    if(token['Market_Cap'] >= 50000 and token['Liquidity_Pool_Value'] >= 20000):
+    print(f"***Market_Cap: {token['market_cap']}") # Market_Cap: 887.3k / Liquidity_Pool_Value: 56.4k
+    if(token['market_cap'] >= 50000 and token['liquidity_pool_value'] >= 20000):
         return True
     return False 
 
@@ -136,21 +140,66 @@ def extract_pool_info(text: str) -> dict:
     
     # Return the extracted information
     return {
-        'Ticker': ticker.group(1) if ticker else None,
-        'Name': name.group(1) if name else None,
-        'Description': description.group(1).strip() if description else None,
-        'Renounced': "YES" if renounced and renounced.group(1) == r"✅" else "No",
-        'Burned': "YES" if burned and burned.group(1) == r"✅" else "No",
-        'Freeze': freeze.group(1) if freeze and freeze else "No",
+        'ca': mint.group(1) if mint else None,
+        'ticker': ticker.group(1) if ticker else None,
+        'token_name': name.group(1) if name else None,
+        'description': description.group(1).strip() if description else None,
+        'renounced_yn': "YES" if renounced and renounced.group(1) == r"✅" else "No",
+        'burned_yn': "YES" if burned and burned.group(1) == r"✅" else "No",
+        'freeze_yn': freeze.group(1) if freeze and freeze else "No",
         # 'Creator Distribution': creator_distribution.group(1) if creator_distribution else None,
-        'Top_5_Holder_Percent': top5_distribution.group(1) if top5_distribution else None,
-        'Top_20_Holder_Percent': top20_distribution.group(1) if top20_distribution else None,
-        'Market_Cap': string_to_float(market_cap.group(1)) if market_cap else None,
-        'Liquidity_Pool_Value': string_to_float(liquidity_pool_value.group(1)) if liquidity_pool_value else None,
-        'Mint': mint.group(1) if mint else None,
-        "Dex_Url": f"https://dexscreener.com/solana/{mint.group(1) if mint else None}",
-        "Photon_Url": f"https://photon-sol.tinyastro.io/en/lp/{mint.group(1) if mint else None}"
+        'top_5_holder_percent': top5_distribution.group(1) if top5_distribution else None,
+        'top_20_holder_percent': top20_distribution.group(1) if top20_distribution else None,
+        'market_cap': string_to_float(market_cap.group(1)) if market_cap else None,
+        'liquidity_pool_value': string_to_float(liquidity_pool_value.group(1)) if liquidity_pool_value else None,
+        "dex_url": f"https://dexscreener.com/solana/{mint.group(1) if mint else None}",
+        "photon_url": f"https://photon-sol.tinyastro.io/en/lp/{mint.group(1) if mint else None}"
     }
+
+
+def add_record_to_db(db_url: str, tbl_name: str, data: dict):
+    """
+    Inserts a new token pool information into a 'token_pool_info' table in the Heroku PostgreSQL database.
+
+    Parameters:
+    - db_url (str): The database connection URL.
+    - table_name (str): The name of the table to insert the data into.
+    - data (dict): A dictionary where keys are column names and values are the corresponding values to insert.
+
+    Returns:
+    - None
+    """
+    try:
+        # Connect to Heroku postgreSql db
+        conn = psycopg2.connect(DATABASE_URL, sslmode='require')
+        cursor = conn.cursor()
+
+        # Prepare the Sql query
+        columns = data.keys()
+        values = data.values()
+        insert_statement = sql.SQL(
+            'INSERT INTO {table} ({fields}) VALUES ({placeholders})'
+        ).format(
+            table = sql.Identifier(tbl_name),
+            fields = sql.SQL(', ').join(map(sql.Identifier, columns)),
+            placeholders = sql.SQL(', ').join(sql.Placeholder() * len(columns))
+        )
+
+        # Exec sql query
+        cursor.execute(insert_statement, list(values))
+
+        # Commit transaction
+        conn.commit()
+        print("Token info added to db.")
+
+    except (Exception, psycopg2.Error) as error:
+        print(f"Error while connecting to PostgreSql: {error}") 
+    finally:
+        # Close the db connection
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
 def string_to_float(s):
@@ -187,7 +236,6 @@ async def main() -> None:
     print("Start polling...")
     await dp.start_polling(bot)
 
+
 if __name__ == "__main__":
     asyncio.run(main())
-
-# ### Test Case ### #
